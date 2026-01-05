@@ -1,0 +1,364 @@
+#!/bin/bash
+
+#########################
+#  Functions definition #
+#########################
+# Return help to use this script
+function ReturnHelp() {
+  echo 'Utilisation: ipctl <command> [<services names>] [to <ifindex>]'
+  echo '  service name: a name that is DNS associed with a global IPv6'
+  echo '  available commands: list add del'
+  echo 'Commands explanation:'
+  echo '  list : display all ethernet NIC with its index and IPv6 addresses'
+  echo '  add : - will add one or more service address to a NIC'
+  echo '        - end line with "to <n>" to specify the NIC'
+  echo '        - if no NIC index is given, it will use the first one'
+  exit 1
+}
+
+# get the uuid of a nic device
+function GetNmcliUuid() {
+  local UUID=$(nmcli -c no -f uuid,device con show | awk '{if($2=="'$1'") {print $1}}')
+  if [[ -z $UUID ]]; then
+    return 1
+  fi
+  echo  $UUID
+  return 0
+}
+
+# Retrive name of the first up ethernet NIC
+function GetUpEthNic() {
+  local Nics=( $(ls /sys/class/net | sed 's/ /\n/g') )
+  for CurNic in "${Nics[@]}"; do
+     if [[ -e /sys/class/net/$CurNic/device && \
+       ! -e /sys/class/net/$CurNic/wireless && \
+       $(cat /sys/class/net/$CurNic/operstate) == 'up' ]]; then
+       echo $CurNic
+       return 0
+     fi
+  done
+  return 1
+}
+
+# Retrive name of the NIC corresponding to IfIndex
+function GetNicByIndex() {
+  local IfIndex=$1
+  local Nics=( $(ls /sys/class/net | sed 's/ /\n/g') )
+  for CurNic in "${Nics[@]}"; do
+     if [[ $(cat /sys/class/net/$CurNic/operstate) == 'up' && \
+       $(cat /sys/class/net/$CurNic/ifindex) == $IfIndex ]]; then
+       echo $CurNic
+       return 0
+     fi
+  done
+  return 1
+}
+
+# Retrive names of all ethernet NICs
+function GetUpEthNics() {
+  local Nics=( $(ls /sys/class/net | sed 's/ /\n/g') )
+  local EthNics=()
+  local NicFound=0
+  for CurNic in "${Nics[@]}"; do
+     if [[ -e /sys/class/net/$CurNic/device && \
+       ! -e /sys/class/net/$CurNic/wireless && \
+       $(cat /sys/class/net/$CurNic/operstate) == 'up' ]]; then
+       echo $CurNic
+       NicFound=1
+     fi
+  done
+  if [[ $NicFound > 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Retrive names of all vlan virtual NICs
+function GetUpVlanNics() {
+  local Nics=( $(ls /sys/class/net | sed 's/ /\n/g') )
+  local EthNics=()
+  local NicFound=0
+  for CurNic in "${Nics[@]}"; do
+     local DevType=$(cat /sys/class/net/$CurNic/uevent | awk 'BEGIN { FS="=" } ; {if($1 == "DEVTYPE") {print $2}}')
+     if [[ ! -e /sys/class/net/$CurNic/device && \
+       ! -e /sys/class/net/$CurNic/wireless && \
+       $DevType == 'vlan' && \
+       $(cat /sys/class/net/$CurNic/operstate) == 'up' ]]; then
+       echo $CurNic
+       NicFound=1
+     fi
+  done
+  if [[ $NicFound > 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Retrive names of all bridges virtual NICs
+function GetUpBridgeNics() {
+  local Nics=( $(ls /sys/class/net | sed 's/ /\n/g') )
+  local EthNics=()
+  local NicFound=0
+  for CurNic in "${Nics[@]}"; do
+     local DevType=$(cat /sys/class/net/$CurNic/uevent | awk 'BEGIN { FS="=" } ; {if($1 == "DEVTYPE") {print $2}}')
+     if [[ ! -e /sys/class/net/$CurNic/device && \
+       ! -e /sys/class/net/$CurNic/wireless && \
+       $DevType == 'bridge' && \
+       $(cat /sys/class/net/$CurNic/operstate) == 'up' ]]; then
+       echo $CurNic
+       NicFound=1
+     fi
+  done
+  if [[ $NicFound > 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Retrive global IPv6 addresses for a given NIC
+function GetNicGlobalIps() {
+  cat /proc/net/if_inet6 | awk '{ if($6 =="'$1'"){prefix= substr($1,1,1); if(prefix == "2" || prefix == "3"){print substr($1,1,4) ":" substr($1,5,4) ":" substr($1,9,4) ":" substr($1,13,4) ":" substr($1,17,4) ":" substr($1,21,4) ":" substr($1,25,4) ":" substr($1,29,4)}}}'
+}
+
+# Retrive ULA IPv6 addresses for a given NIC
+function GetNicLocalIps() {
+  cat /proc/net/if_inet6 | awk '{ if($6 =="'$1'"){prefix= substr($1,1,2); if(prefix == "fc" || prefix == "fd"){print substr($1,1,4) ":" substr($1,5,4) ":" substr($1,9,4) ":" substr($1,13,4) ":" substr($1,17,4) ":" substr($1,21,4) ":" substr($1,25,4) ":" substr($1,29,4)}}}'
+}
+
+# Test if given address is one of the given NIC
+function IsAddrOfNic() {
+  local InNic=$1
+  local InAddr=$2
+  local NicAddrs=( $(GetNicGlobalIps $InNic) $(GetNicLocalIps $InNic) )
+  for CurAddr in "${NicAddrs[@]}"; do
+    if [[ $CurAddr == $InAddr ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Retrive IPv6 address of service if available
+function ServiceIPv6() {
+  if ! local RawIPv6=$(getent hosts $1 | awk '{print $1;}') ; then
+    return 1
+  fi
+  if [[ -z $RawIPv6 ]]; then
+    if ! local RawIPv6=$(dig AAAA +short $1) ; then
+      return 1
+    fi
+    if [[ -z $RawIPv6 ]]; then
+      return 1
+    fi
+  fi
+
+  #Need to uncompress this address to be able to extract parts of it
+  echo $RawIPv6 | \
+    awk '{if(NF<8){inner = "0"; for(missing = (8 - NF);missing>0;--missing){inner = inner ":0"}; if($2 == ""){$2 = inner} else if($3 == ""){$3 = inner} else if($4 == ""){$4 = inner} else if($5 == ""){$5 = inner} else if($6 == ""){$6 = inner} else if($7 == ""){$7 = inner}}; print $0}' FS=":" OFS=":" | \
+    awk '{for(i=1;i<9;++i){len = length($(i)); if(len < 1){$(i) = "0000"} else if(len < 2){$(i) = "000" $(i)} else if(len < 3){$(i) = "00" $(i)} else if(len < 4){$(i) = "0" $(i)}}; print $0}' FS=":" OFS=":"
+  return 0
+}
+
+#################
+# Main programm #
+#################
+if [[ -z $1 ]]; then
+  echo 'Missing command!'
+  ReturnHelp
+fi
+
+Command=$1
+shift 1
+
+# list command
+if [[ "list" == $Command ]]; then
+  echo -n "Recherche des cartes réseau ethernet: "
+  if ! Nics=($(GetUpEthNics)) ; then
+    echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+  else
+    echo -e '\E[32;01m✔\E[0m'
+    for CurNic in "${Nics[@]}"; do
+      ifindex=$(cat "/sys/class/net/$CurNic/ifindex")
+      echo -e ' — \E[36;01;03m'$CurNic'\E[0m : \E[33;01;03m'$ifindex'\E[0m'
+      NicAddrs=( $(GetNicGlobalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+      NicAddrs=( $(GetNicLocalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+    done
+  fi
+
+  echo -n "Recherche des cartes réseau vlan: "
+  if ! Nics=($(GetUpVlanNics)) ; then
+    echo -e '\E[31;01m✘\E[0m Pas de carte vlan'
+  else
+    echo -e '\E[32;01m✔\E[0m'
+    for CurNic in "${Nics[@]}"; do
+      ifindex=$(cat "/sys/class/net/$CurNic/ifindex")
+      echo -e ' — \E[36;01;03m'$CurNic'\E[0m : \E[33;01;03m'$ifindex'\E[0m'
+      NicAddrs=( $(GetNicGlobalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+      NicAddrs=( $(GetNicLocalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+    done
+  fi
+
+  echo -n "Recherche des ponts réseau: "
+  if ! Nics=($(GetUpBridgeNics)) ; then
+    echo -e '\E[31;01m✘\E[0m Pas de pont'
+  else
+    echo -e '\E[32;01m✔\E[0m'
+    for CurNic in "${Nics[@]}"; do
+      ifindex=$(cat "/sys/class/net/$CurNic/ifindex")
+      echo -e ' — \E[36;01;03m'$CurNic'\E[0m : \E[33;01;03m'$ifindex'\E[0m'
+      NicAddrs=( $(GetNicGlobalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+      NicAddrs=( $(GetNicLocalIps $CurNic) )
+      for CurAddr in "${NicAddrs[@]}"; do
+        MachineName=$(dig +short -x $CurAddr)
+        echo -e '   — \E[35;01;03m'$CurAddr'\E[0m ⇨ '$MachineName
+      done
+    done
+  fi
+  exit 0
+fi
+
+# add command
+if [[ "add" == $Command ]]; then
+  #STEP1: read all remaining arguments
+  ServicesNames=()
+  ServicesAddrs=()
+  while [[ $# > 0 ]]; do
+    CurArg=$1
+    shift 1
+    if [[ $CurArg == 'to' ]]; then
+      IfIndex=$1
+      shift 1
+      echo -n -e 'Recherche carte réseau \E[33;01m'$IfIndex'\E[0m : '
+      ServicesNic=$(GetNicByIndex $IfIndex)
+      if [[ -z $ServicesNic ]]; then
+        echo -e '\E[31;01m✘\E[0m index incorrect'
+        exit 1
+      else
+        echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServicesNic'\E[0m'
+      fi
+    else
+      echo -n "Recherche adresse du service "$CurArg" : "
+      ServiceAddr=$(ServiceIPv6 $CurArg)
+      if [[ $? > 0 ]]; then
+        exit 1
+      fi
+      if [[ -z $ServiceAddr ]]; then
+        echo -e '\E[31;01m✘\E[0m '"Pas d'adresse trouvée pour ce service"
+      else
+        echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServiceAddr'\E[0m'
+        ServicesNames+=($CurArg)
+        ServicesAddrs+=($ServiceAddr)
+      fi
+    fi
+  done
+
+  #STEP2: select the default NIC if none have been selected so far
+  if [[ -z $ServicesNic ]]; then
+    ServicesNic=$(GetUpEthNic)
+    echo -n "Sélection carte réseau de travail par défaut : "
+    if [[ -z $ServicesNic ]]; then
+      echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+      exit 1
+    fi
+    echo -e '\E[32;01m✔\E[0m '$ServicesNic
+  fi
+
+  #STEP3: do the job
+  for ServiceAddr in "${ServicesAddrs[@]}"; do
+    echo -n "Ajout de l'adresse $ServiceAddr : "
+    if IsAddrOfNic $ServicesNic $ServiceAddr; then
+      echo -e '\E[32;01m✔\E[0m déjà attribuée'
+    else
+      if ip addr add $ServiceAddr'/64' dev $ServicesNic; then
+        echo -e '\E[32;01m✔\E[0m OK'
+      else
+        echo -e '\E[31;01m✘\E[0m Erreur'
+      fi
+    fi
+  done
+  exit 0
+fi
+
+# del command
+if [[ "del" == $Command ]]; then
+  #STEP1: read all remaining arguments
+  ServicesNames=()
+  ServicesAddrs=()
+  while [[ $# > 0 ]]; do
+    CurArg=$1
+    shift 1
+    if [[ $CurArg == 'to' ]]; then
+      IfIndex=$1
+      shift 1
+      echo -n -e 'Recherche carte réseau \E[33;01m'$IfIndex'\E[0m : '
+      ServicesNic=$(GetNicByIndex $IfIndex)
+      if [[ -z $ServicesNic ]]; then
+        echo -e '\E[31;01m✘\E[0m index incorrect'
+        exit 1
+      else
+        echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServicesNic'\E[0m'
+      fi
+    else
+      echo -n "Recherche adresse du service "$CurArg" : "
+      ServiceAddr=$(ServiceIPv6 $CurArg)
+      if [[ -z $ServiceAddr ]]; then
+        echo -e '\E[31;01m✘\E[0m '"Pas d'adresse trouvée pour ce service"
+      else
+        echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServiceAddr'\E[0m'
+        ServicesNames+=($CurArg)
+        ServicesAddrs+=($ServiceAddr)
+      fi
+    fi
+  done
+
+  #STEP2: select the default NIC if none have been selected so far
+  if [[ -z $ServicesNic ]]; then
+    ServicesNic=$(GetUpEthNic)
+    echo -n "Sélection carte réseau de travail par défaut : "
+    if [[ -z $ServicesNic ]]; then
+      echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+      exit 1
+    fi
+    echo -e '\E[32;01m✔\E[0m '$ServicesNic
+  fi
+
+  #STEP3: do the job
+  for ServiceAddr in "${ServicesAddrs[@]}"; do
+    echo -n "Retrait de l'adresse $ServiceAddr : "
+    if ! IsAddrOfNic $ServicesNic $ServiceAddr; then
+      echo -e '\E[32;01m✔\E[0m adresse non attribuée'
+    else
+      if ip addr del $ServiceAddr'/64' dev $ServicesNic; then
+        echo -e '\E[32;01m✔\E[0m OK'
+      else
+        echo -e '\E[31;01m✘\E[0m Erreur'
+        exit 1
+      fi
+    fi
+  done
+  exit 0
+fi
+
+# unknown command
+echo -e 'Command \E[34;01m'$Command'\E[0m does not exists'
+ReturnHelp
