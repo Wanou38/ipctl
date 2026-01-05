@@ -5,7 +5,7 @@
 #########################
 # Return help to use this script
 function ReturnHelp() {
-  echo 'Utilisation: ipctl <command> [<services names>] [to <ifindex>]'
+  echo 'Use: ipctl <command> [<services names>] [to <ifindex>]'
   echo '  service name: a name that is DNS associed with a global IPv6'
   echo '  available commands: list add del'
   echo 'Commands explanation:'
@@ -172,9 +172,9 @@ shift 1
 
 # list command
 if [[ "list" == $Command ]]; then
-  echo -n "Recherche des cartes réseau ethernet: "
+  echo -n "Ethernet interfaces: "
   if ! Nics=($(GetUpEthNics)) ; then
-    echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+    echo -e '\E[31;01m✘\E[0m no ethernet port available'
   else
     echo -e '\E[32;01m✔\E[0m'
     for CurNic in "${Nics[@]}"; do
@@ -193,9 +193,9 @@ if [[ "list" == $Command ]]; then
     done
   fi
 
-  echo -n "Recherche des cartes réseau vlan: "
+  echo -n "vlan interfaces: "
   if ! Nics=($(GetUpVlanNics)) ; then
-    echo -e '\E[31;01m✘\E[0m Pas de carte vlan'
+    echo -e '\E[31;01m✘\E[0m no vlan port available'
   else
     echo -e '\E[32;01m✔\E[0m'
     for CurNic in "${Nics[@]}"; do
@@ -214,9 +214,9 @@ if [[ "list" == $Command ]]; then
     done
   fi
 
-  echo -n "Recherche des ponts réseau: "
+  echo -n "network bridges: "
   if ! Nics=($(GetUpBridgeNics)) ; then
-    echo -e '\E[31;01m✘\E[0m Pas de pont'
+    echo -e '\E[31;01m✘\E[0m no bridge available'
   else
     echo -e '\E[32;01m✔\E[0m'
     for CurNic in "${Nics[@]}"; do
@@ -248,22 +248,22 @@ if [[ "add" == $Command ]]; then
     if [[ $CurArg == 'to' ]]; then
       IfIndex=$1
       shift 1
-      echo -n -e 'Recherche carte réseau \E[33;01m'$IfIndex'\E[0m : '
+      echo -n -e 'Looking from NIC \E[33;01m'$IfIndex'\E[0m : '
       ServicesNic=$(GetNicByIndex $IfIndex)
       if [[ -z $ServicesNic ]]; then
-        echo -e '\E[31;01m✘\E[0m index incorrect'
+        echo -e '\E[31;01m✘\E[0m bad NIC index'
         exit 1
       else
         echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServicesNic'\E[0m'
       fi
     else
-      echo -n "Recherche adresse du service "$CurArg" : "
+      echo -n "Service "$CurArg" address lookup : "
       ServiceAddr=$(ServiceIPv6 $CurArg)
       if [[ $? > 0 ]]; then
         exit 1
       fi
       if [[ -z $ServiceAddr ]]; then
-        echo -e '\E[31;01m✘\E[0m '"Pas d'adresse trouvée pour ce service"
+        echo -e '\E[31;01m✘\E[0m no address found for that service'
       else
         echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServiceAddr'\E[0m'
         ServicesNames+=($CurArg)
@@ -275,9 +275,9 @@ if [[ "add" == $Command ]]; then
   #STEP2: select the default NIC if none have been selected so far
   if [[ -z $ServicesNic ]]; then
     ServicesNic=$(GetUpEthNic)
-    echo -n "Sélection carte réseau de travail par défaut : "
+    echo -n "Selecting default NIC for the operation : "
     if [[ -z $ServicesNic ]]; then
-      echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+      echo -e '\E[31;01m✘\E[0m no ethernet NIC available'
       exit 1
     fi
     echo -e '\E[32;01m✔\E[0m '$ServicesNic
@@ -285,14 +285,14 @@ if [[ "add" == $Command ]]; then
 
   #STEP3: do the job
   for ServiceAddr in "${ServicesAddrs[@]}"; do
-    echo -n "Ajout de l'adresse $ServiceAddr : "
+    echo -n "adding $ServiceAddr address : "
     if IsAddrOfNic $ServicesNic $ServiceAddr; then
-      echo -e '\E[32;01m✔\E[0m déjà attribuée'
+      echo -e '\E[32;01m✔\E[0m allready attributed'
     else
       if ip addr add $ServiceAddr'/64' dev $ServicesNic; then
         echo -e '\E[32;01m✔\E[0m OK'
       else
-        echo -e '\E[31;01m✘\E[0m Erreur'
+        echo -e '\E[31;01m✘\E[0m Error'
       fi
     fi
   done
@@ -307,22 +307,22 @@ if [[ "del" == $Command ]]; then
   while [[ $# > 0 ]]; do
     CurArg=$1
     shift 1
-    if [[ $CurArg == 'to' ]]; then
+    if [[ $CurArg == 'to' || $CurArg == 'from' ]]; then
       IfIndex=$1
       shift 1
-      echo -n -e 'Recherche carte réseau \E[33;01m'$IfIndex'\E[0m : '
+      echo -n -e 'Looking from NIC \E[33;01m'$IfIndex'\E[0m : '
       ServicesNic=$(GetNicByIndex $IfIndex)
       if [[ -z $ServicesNic ]]; then
-        echo -e '\E[31;01m✘\E[0m index incorrect'
+        echo -e '\E[31;01m✘\E[0m bad NIC index'
         exit 1
       else
         echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServicesNic'\E[0m'
       fi
     else
-      echo -n "Recherche adresse du service "$CurArg" : "
+      echo -n "Service "$CurArg" address lookup : "
       ServiceAddr=$(ServiceIPv6 $CurArg)
       if [[ -z $ServiceAddr ]]; then
-        echo -e '\E[31;01m✘\E[0m '"Pas d'adresse trouvée pour ce service"
+        echo -e '\E[31;01m✘\E[0m no address found for that service'
       else
         echo -e '\E[32;01m✔\E[0m \E[35;01;03m'$ServiceAddr'\E[0m'
         ServicesNames+=($CurArg)
@@ -334,9 +334,9 @@ if [[ "del" == $Command ]]; then
   #STEP2: select the default NIC if none have been selected so far
   if [[ -z $ServicesNic ]]; then
     ServicesNic=$(GetUpEthNic)
-    echo -n "Sélection carte réseau de travail par défaut : "
+    echo -n "Selecting default NIC for the operation : "
     if [[ -z $ServicesNic ]]; then
-      echo -e '\E[31;01m✘\E[0m Pas de carte ethernet disponible'
+      echo -e '\E[31;01m✘\E[0m no ethernet NIC available'
       exit 1
     fi
     echo -e '\E[32;01m✔\E[0m '$ServicesNic
@@ -344,14 +344,14 @@ if [[ "del" == $Command ]]; then
 
   #STEP3: do the job
   for ServiceAddr in "${ServicesAddrs[@]}"; do
-    echo -n "Retrait de l'adresse $ServiceAddr : "
+    echo -n "removing $ServiceAddr address: "
     if ! IsAddrOfNic $ServicesNic $ServiceAddr; then
-      echo -e '\E[32;01m✔\E[0m adresse non attribuée'
+      echo -e '\E[32;01m✔\E[0m address not attributed'
     else
       if ip addr del $ServiceAddr'/64' dev $ServicesNic; then
         echo -e '\E[32;01m✔\E[0m OK'
       else
-        echo -e '\E[31;01m✘\E[0m Erreur'
+        echo -e '\E[31;01m✘\E[0m Error'
         exit 1
       fi
     fi
